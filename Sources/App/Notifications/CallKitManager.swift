@@ -1,0 +1,184 @@
+import CallKit
+import Foundation
+import PromiseKit
+import Shared
+import UserNotifications
+
+/// Routes `homeassistant.command == "incoming_call"` notifications to the `CallKitManager`.
+///
+/// Registered with `NotificationCommandManager` like every other native push command, so an
+/// incoming call is dispatched through the same path as `clear_notification`, `update_widgets`,
+/// etc. It overrides the full-`userInfo` variant because the call screen reuses standard
+/// notification fields (title, top-level `url`, attachment) that live outside the `homeassistant`
+/// command dictionary.
+struct IncomingCallNotificationCommandHandler: NotificationCommandHandler {
+    let callKitManager: CallKitManager
+
+    func handle(_ payload: [String: Any]) -> Promise<Void> {
+        // The command dictionary alone lacks the standard notification fields the call screen needs;
+        // the real work happens in the `userInfo` variant below.
+        .value(())
+    }
+
+    func handle(_ payload: [String: Any], userInfo: [AnyHashable: Any]) -> Promise<Void> {
+        callKitManager.reportIncomingCall(userInfo: userInfo)
+        return .value(())
+    }
+}
+
+/// Bridges incoming call notifications (e.g. a WebRTC doorbell) to the system CallKit UI.
+///
+/// When a notification carrying an `incoming_call` command is received, `reportIncomingCall(userInfo:)`
+/// presents a native incoming-call screen showing the notification title (caller name) and, when
+/// available, the notification thumbnail. Answering the call navigates the frontend to the
+/// configured screen, reusing the same routing as a notification tap.
+final class CallKitManager: NSObject {
+    /// Context for the single in-flight call. The doorbell scenario only ever needs one call at a
+    /// time, so a fresh provider is created per call (which also lets the thumbnail/icon vary).
+    private struct ActiveCall {
+        let uuid: UUID
+        let provider: CXProvider
+        let server: Server
+        let navigatePath: String?
+    }
+
+    private var activeCall: ActiveCall?
+
+    /// Reports an incoming call for the given notification payload, if it describes one.
+    func reportIncomingCall(userInfo: [AnyHashable: Any]) {
+        guard let payload = CallKitNotificationPayload(userInfo: userInfo) else {
+            return
+        }
+
+        // Reuse the notification infrastructure: build content so we can resolve the originating
+        // server and download any attachment thumbnail exactly as a banner notification would.
+        let content = UNMutableNotificationContent()
+        content.userInfo = userInfo
+
+        guard let server = Current.servers.server(for: content) else {
+            Current.Log.error("CallKit: ignoring incoming call, unable to resolve server")
+            return
+        }
+
+        Current.Log.info("CallKit: reporting incoming call from \(payload.callerName)")
+
+        Task { [weak self] in
+            let iconData = await Self.thumbnailData(for: content, server: server)
+            // Provider creation and `activeCall` mutation must happen on the main thread, which is
+            // also the queue CallKit delivers its delegate callbacks on (see `setDelegate`).
+            await MainActor.run {
+                self?.presentCall(payload: payload, server: server, iconData: iconData)
+            }
+        }
+    }
+
+    /// Best-effort download of the notification attachment as raw image data for the call icon.
+    private static func thumbnailData(for content: UNNotificationContent, server: Server) async -> Data? {
+        guard content.userInfo["attachment"] != nil, let api = Current.api(for: server) else {
+            return nil
+        }
+
+        // Temporary PromiseKit→async bridge: `notificationAttachmentManager` still vends a `Promise`.
+        // This can be simplified once that API is migrated to async/await.
+        let url: URL? = await withCheckedContinuation { continuation in
+            Current.notificationAttachmentManager.downloadAttachment(from: content, api: api).pipe { result in
+                switch result {
+                case let .fulfilled(url):
+                    continuation.resume(returning: url)
+                case let .rejected(error):
+                    Current.Log.info("CallKit: no thumbnail for call (\(error.localizedDescription))")
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+
+        guard let url else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    private func presentCall(payload: CallKitNotificationPayload, server: Server, iconData: Data?) {
+        // Replace any previous ringing call; a new doorbell press supersedes the old one.
+        endActiveCall()
+
+        let configuration = CXProviderConfiguration()
+        configuration.supportsVideo = payload.hasVideo
+        configuration.maximumCallGroups = 1
+        configuration.maximumCallsPerCallGroup = 1
+        configuration.supportedHandleTypes = [.generic]
+        if let iconData {
+            // The thumbnail shown on the system call screen.
+            configuration.iconTemplateImageData = iconData
+        }
+
+        let provider = CXProvider(configuration: configuration)
+        // `nil` queue delivers delegate callbacks on the main thread.
+        provider.setDelegate(self, queue: nil)
+
+        let uuid = UUID()
+        activeCall = ActiveCall(
+            uuid: uuid,
+            provider: provider,
+            server: server,
+            navigatePath: payload.navigatePath
+        )
+
+        let update = CXCallUpdate()
+        update.localizedCallerName = payload.callerName
+        update.remoteHandle = CXHandle(type: .generic, value: payload.handle)
+        update.hasVideo = payload.hasVideo
+        update.supportsHolding = false
+        update.supportsGrouping = false
+        update.supportsUngrouping = false
+        update.supportsDTMF = false
+
+        provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+            if let error {
+                Current.Log.error("CallKit: failed to report incoming call: \(error.localizedDescription)")
+                self?.endActiveCall()
+            }
+        }
+    }
+
+    private func endActiveCall() {
+        guard let call = activeCall else { return }
+        call.provider.invalidate()
+        activeCall = nil
+    }
+
+    /// Routes the frontend to the call's configured screen once it has been answered.
+    private func navigate(for call: ActiveCall) {
+        guard let path = call.navigatePath else { return }
+        let server = call.server
+        Current.Log.info("CallKit: navigating to \(path) after call answered")
+        // `appCoordinator` resolves once the web view window is ready; its `done` closure runs on
+        // the main queue, so the navigation happens on the main thread.
+        Current.sceneManager.appCoordinator.done {
+            $0.open(from: .notification, server: server, urlString: path, isComingFromAppIntent: false)
+        }
+    }
+}
+
+extension CallKitManager: CXProviderDelegate {
+    func providerDidReset(_ provider: CXProvider) {
+        if activeCall?.provider === provider {
+            activeCall = nil
+        }
+    }
+
+    func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+        guard let call = activeCall, call.uuid == action.callUUID else {
+            action.fail()
+            return
+        }
+
+        navigate(for: call)
+        action.fulfill()
+    }
+
+    func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        action.fulfill()
+        if activeCall?.uuid == action.callUUID {
+            endActiveCall()
+        }
+    }
+}

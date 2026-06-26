@@ -32,10 +32,15 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     }()
 
     var commandManager = NotificationCommandManager()
+    let callKitManager = CallKitManager()
     private weak var cameraOverlayController: UIViewController?
 
     override init() {
         super.init()
+        commandManager.register(
+            command: CallKitNotificationPayload.command,
+            handler: IncomingCallNotificationCommandHandler(callKitManager: callKitManager)
+        )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didBecomeActive),
