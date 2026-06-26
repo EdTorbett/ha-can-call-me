@@ -6,6 +6,18 @@ import WidgetKit
 
 public protocol NotificationCommandHandler {
     func handle(_ payload: [String: Any]) -> Promise<Void>
+
+    /// Handles a command with access to the full notification `userInfo`, not just the
+    /// `homeassistant` command dictionary. Most handlers only need the command dictionary and rely
+    /// on the default implementation; handlers that reuse standard notification fields (e.g. the
+    /// notification `title` or top-level `url`, which live outside `homeassistant`) override this.
+    func handle(_ payload: [String: Any], userInfo: [AnyHashable: Any]) -> Promise<Void>
+}
+
+public extension NotificationCommandHandler {
+    func handle(_ payload: [String: Any], userInfo: [AnyHashable: Any]) -> Promise<Void> {
+        handle(payload)
+    }
 }
 
 public class NotificationCommandManager {
@@ -64,7 +76,7 @@ public class NotificationCommandManager {
         }
 
         if let handler = commands[command] {
-            return handler.handle(hadict)
+            return handler.handle(hadict, userInfo: payload)
         } else {
             return .init(error: CommandError.unknownCommand)
         }

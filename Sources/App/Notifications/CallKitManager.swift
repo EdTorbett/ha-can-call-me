@@ -4,9 +4,31 @@ import PromiseKit
 import Shared
 import UserNotifications
 
+/// Routes `homeassistant.command == "incoming_call"` notifications to the `CallKitManager`.
+///
+/// Registered with `NotificationCommandManager` like every other native push command, so an
+/// incoming call is dispatched through the same path as `clear_notification`, `update_widgets`,
+/// etc. It overrides the full-`userInfo` variant because the call screen reuses standard
+/// notification fields (title, top-level `url`, attachment) that live outside the `homeassistant`
+/// command dictionary.
+struct IncomingCallNotificationCommandHandler: NotificationCommandHandler {
+    let callKitManager: CallKitManager
+
+    func handle(_ payload: [String: Any]) -> Promise<Void> {
+        // The command dictionary alone lacks the standard notification fields the call screen needs;
+        // the real work happens in the `userInfo` variant below.
+        .value(())
+    }
+
+    func handle(_ payload: [String: Any], userInfo: [AnyHashable: Any]) -> Promise<Void> {
+        callKitManager.reportIncomingCall(userInfo: userInfo)
+        return .value(())
+    }
+}
+
 /// Bridges incoming call notifications (e.g. a WebRTC doorbell) to the system CallKit UI.
 ///
-/// When a notification carrying a `callkit` payload is received, `reportIncomingCall(userInfo:)`
+/// When a notification carrying an `incoming_call` command is received, `reportIncomingCall(userInfo:)`
 /// presents a native incoming-call screen showing the notification title (caller name) and, when
 /// available, the notification thumbnail. Answering the call navigates the frontend to the
 /// configured screen, reusing the same routing as a notification tap.

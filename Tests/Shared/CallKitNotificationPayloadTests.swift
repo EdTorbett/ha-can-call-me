@@ -2,16 +2,20 @@
 import XCTest
 
 final class CallKitNotificationPayloadTests: XCTestCase {
-    func testReturnsNilWhenNoCallKitPayload() {
+    func testReturnsNilWhenNotAnIncomingCallCommand() {
         XCTAssertNil(CallKitNotificationPayload(userInfo: [:]))
+        // A standard notification with a title but no command is not a call.
         XCTAssertNil(CallKitNotificationPayload(userInfo: ["aps": ["alert": ["title": "Front Door"]]]))
+        // A different command is not a call.
+        XCTAssertNil(CallKitNotificationPayload(userInfo: ["homeassistant": ["command": "clear_notification"]]))
     }
 
-    func testParsesFullPayload() throws {
+    func testParsesUnifiedPayload() throws {
         let payload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
-            "callkit": [
-                "caller_name": "Front Door",
-                "navigate_path": "/lovelace/doorbell",
+            "aps": ["alert": ["title": "Front Door"]],
+            "url": "/lovelace/doorbell",
+            "homeassistant": [
+                "command": "incoming_call",
                 "video": true,
                 "handle": "front_door",
             ],
@@ -23,10 +27,11 @@ final class CallKitNotificationPayloadTests: XCTestCase {
         XCTAssertEqual(payload.handle, "front_door")
     }
 
-    func testFallsBackToNotificationTitleForCallerName() throws {
+    func testCallerNameComesFromNotificationTitle() throws {
         let payload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
             "aps": ["alert": ["title": "Back Door"]],
-            "callkit": ["navigate_path": "/lovelace/doorbell"],
+            "url": "/lovelace/doorbell",
+            "homeassistant": ["command": "incoming_call"],
         ]))
 
         XCTAssertEqual(payload.callerName, "Back Door")
@@ -34,31 +39,51 @@ final class CallKitNotificationPayloadTests: XCTestCase {
         XCTAssertEqual(payload.handle, "Back Door")
     }
 
+    func testFallsBackToDefaultCallerWhenNoTitle() throws {
+        let payload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
+            "homeassistant": ["command": "incoming_call"],
+        ]))
+
+        XCTAssertFalse(payload.callerName.isEmpty)
+        XCTAssertNil(payload.navigatePath)
+    }
+
     func testDefaultsVideoToTrueAndAllowsDisabling() throws {
-        let withDefault = try XCTUnwrap(CallKitNotificationPayload(userInfo: ["callkit": [:]]))
+        let withDefault = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
+            "homeassistant": ["command": "incoming_call"],
+        ]))
         XCTAssertTrue(withDefault.hasVideo)
 
-        let audioOnly = try XCTUnwrap(CallKitNotificationPayload(userInfo: ["callkit": ["video": false]]))
+        let audioOnly = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
+            "homeassistant": ["command": "incoming_call", "video": false],
+        ]))
         XCTAssertFalse(audioOnly.hasVideo)
     }
 
-    func testSupportsUrlAliasForNavigatePath() throws {
-        let payload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
-            "callkit": ["url": "/lovelace/doorbell"],
+    func testSupportsUriAndClickActionForNavigation() throws {
+        let uriPayload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
+            "uri": "/lovelace/doorbell",
+            "homeassistant": ["command": "incoming_call"],
         ]))
+        XCTAssertEqual(uriPayload.navigatePath, "/lovelace/doorbell")
 
-        XCTAssertEqual(payload.navigatePath, "/lovelace/doorbell")
+        let clickActionPayload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
+            "clickAction": "/lovelace/garage",
+            "homeassistant": ["command": "incoming_call"],
+        ]))
+        XCTAssertEqual(clickActionPayload.navigatePath, "/lovelace/garage")
     }
 
     func testIgnoresEmptyStringsAndFallsBack() throws {
         let payload = try XCTUnwrap(CallKitNotificationPayload(userInfo: [
-            "callkit": [
-                "caller_name": "",
-                "navigate_path": "",
-            ],
+            "url": "",
+            "aps": ["alert": ["title": ""]],
+            "homeassistant": ["command": "incoming_call", "handle": ""],
         ]))
 
         XCTAssertNil(payload.navigatePath)
         XCTAssertFalse(payload.callerName.isEmpty)
+        // Empty handle falls back to the caller name.
+        XCTAssertEqual(payload.handle, payload.callerName)
     }
 }

@@ -3,26 +3,33 @@ import UserNotifications
 
 /// Describes an incoming CallKit call carried by a push notification.
 ///
-/// A doorbell (or any other WebRTC caller) sends a notification whose `userInfo` contains a
-/// `callkit` dictionary. When present, the app reports a system call instead of (or in addition to)
-/// showing a banner, and — once the call is answered — navigates to the configured screen.
+/// An incoming call reuses the standard notification command mechanism: the push sets
+/// `homeassistant.command = "incoming_call"`. Caller name and answer navigation reuse the existing
+/// notification fields (the notification `title` and the top-level `url`) rather than introducing
+/// call-specific aliases, so a doorbell automation looks like any other actionable notification with
+/// a couple of extra, genuinely call-specific options (`video`, `handle`).
 ///
 /// Example `data` payload sent from Home Assistant:
 /// ```yaml
 /// data:
-///   # standard notification fields are reused for the call UI
+///   # standard notification fields drive the call UI
+///   title: "Front Door"               # shown as the caller name on the system call screen
+///   url: "/lovelace/doorbell"          # opened in the frontend when the call is answered
 ///   attachment:
-///     url: /api/camera_proxy/camera.front_door
-///   callkit:
-///     caller_name: "Front Door"        # optional, falls back to the notification title
-///     navigate_path: "/lovelace/doorbell"  # opened when the call is answered
+///     url: /api/camera_proxy/camera.front_door  # used as the call icon when available
+///   homeassistant:
+///     command: "incoming_call"         # routes the push to the CallKit handler
 ///     video: true                      # optional, defaults to true (WebRTC video doorbell)
 ///     handle: "front_door"             # optional caller handle/identifier
 /// ```
 public struct CallKitNotificationPayload: Equatable {
-    /// Name shown on the system call screen. Falls back to the notification title, then a default.
+    /// The `homeassistant.command` value that identifies an incoming call notification.
+    public static let command = "incoming_call"
+
+    /// Name shown on the system call screen. Reuses the notification title, then a default.
     public let callerName: String
     /// Path/URL opened in the frontend when the call is answered. `nil` means "stay where we are".
+    /// Reuses the standard notification `url`/`uri`/`clickAction` field.
     public let navigatePath: String?
     /// Whether the call offers video. Defaults to `true` for WebRTC video doorbells.
     public let hasVideo: Bool
@@ -37,23 +44,21 @@ public struct CallKitNotificationPayload: Equatable {
     }
 
     /// Builds a payload from a notification's `userInfo`, or returns `nil` when the notification is
-    /// not a CallKit call.
+    /// not an incoming-call command.
     public init?(userInfo: [AnyHashable: Any]) {
-        guard let callkit = userInfo["callkit"] as? [String: Any] else {
+        guard let command = userInfo["homeassistant"] as? [String: Any],
+              (command["command"] as? String) == CallKitNotificationPayload.command else {
             return nil
         }
 
-        let title = CallKitNotificationPayload.title(from: userInfo)
-        let callerName = (callkit["caller_name"] as? String)?.nonEmpty
-            ?? title
+        let callerName = CallKitNotificationPayload.title(from: userInfo)
             ?? L10n.CallKit.IncomingCall.defaultCaller
 
-        let navigatePath = (callkit["navigate_path"] as? String)?.nonEmpty
-            ?? (callkit["url"] as? String)?.nonEmpty
+        let navigatePath = CallKitNotificationPayload.navigationURL(from: userInfo)
 
-        let hasVideo = callkit["video"] as? Bool ?? true
+        let hasVideo = command["video"] as? Bool ?? true
 
-        let handle = (callkit["handle"] as? String)?.nonEmpty ?? callerName
+        let handle = (command["handle"] as? String)?.nonEmpty ?? callerName
 
         self.init(callerName: callerName, navigatePath: navigatePath, hasVideo: hasVideo, handle: handle)
     }
@@ -69,6 +74,13 @@ public struct CallKitNotificationPayload: Equatable {
         }
 
         return nil
+    }
+
+    /// Resolves the answer-navigation URL from the standard notification fields, mirroring the
+    /// global URL handling in `NotificationManager` (`url`/`uri`/`clickAction`).
+    private static func navigationURL(from userInfo: [AnyHashable: Any]) -> String? {
+        let urlValue = ["url", "uri", "clickAction"].compactMap { userInfo[$0] }.first
+        return (urlValue as? String)?.nonEmpty
     }
 }
 

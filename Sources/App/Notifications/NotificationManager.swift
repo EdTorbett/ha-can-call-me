@@ -37,6 +37,10 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
     override init() {
         super.init()
+        commandManager.register(
+            command: CallKitNotificationPayload.command,
+            handler: IncomingCallNotificationCommandHandler(callKitManager: callKitManager)
+        )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didBecomeActive),
@@ -223,12 +227,6 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
     private func handleRemoteNotification(userInfo: [AnyHashable: Any]) -> Guarantee<UIBackgroundFetchResult> {
         Current.Log.verbose("remote notification: \(userInfo)")
-
-        // A doorbell / WebRTC caller delivers a silent push carrying a `callkit` payload. Report it
-        // as a native incoming call instead of relying on a banner.
-        if userInfo["callkit"] != nil {
-            callKitManager.reportIncomingCall(userInfo: userInfo)
-        }
 
         return commandManager.handle(userInfo).map {
             UIBackgroundFetchResult.newData
