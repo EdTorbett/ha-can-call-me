@@ -56,6 +56,8 @@ final class CallKitManager: NSObject {
             return nil
         }
 
+        // Temporary PromiseKit→async bridge: `notificationAttachmentManager` still vends a `Promise`.
+        // This can be simplified once that API is migrated to async/await.
         let url: URL? = await withCheckedContinuation { continuation in
             Current.notificationAttachmentManager.downloadAttachment(from: content, api: api).pipe { result in
                 switch result {

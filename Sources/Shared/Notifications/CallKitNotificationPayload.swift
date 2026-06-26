@@ -46,7 +46,7 @@ public struct CallKitNotificationPayload: Equatable {
         let title = CallKitNotificationPayload.title(from: userInfo)
         let callerName = (callkit["caller_name"] as? String)?.nonEmpty
             ?? title
-            ?? L10n.Callkit.IncomingCall.defaultCaller
+            ?? L10n.CallKit.IncomingCall.defaultCaller
 
         let navigatePath = (callkit["navigate_path"] as? String)?.nonEmpty
             ?? (callkit["url"] as? String)?.nonEmpty
