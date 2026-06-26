@@ -40,27 +40,36 @@ final class CallKitManager: NSObject {
 
         Current.Log.info("CallKit: reporting incoming call from \(payload.callerName)")
 
-        firstly {
-            thumbnailData(for: content, server: server)
-        }.done { [weak self] imageData in
-            self?.presentCall(payload: payload, server: server, iconData: imageData)
+        Task { [weak self] in
+            let iconData = await Self.thumbnailData(for: content, server: server)
+            // Provider creation and `activeCall` mutation must happen on the main thread, which is
+            // also the queue CallKit delivers its delegate callbacks on (see `setDelegate`).
+            await MainActor.run {
+                self?.presentCall(payload: payload, server: server, iconData: iconData)
+            }
         }
     }
 
     /// Best-effort download of the notification attachment as raw image data for the call icon.
-    private func thumbnailData(for content: UNNotificationContent, server: Server) -> Guarantee<Data?> {
+    private static func thumbnailData(for content: UNNotificationContent, server: Server) async -> Data? {
         guard content.userInfo["attachment"] != nil, let api = Current.api(for: server) else {
-            return .value(nil)
+            return nil
         }
 
-        return Guarantee { seal in
-            Current.notificationAttachmentManager.downloadAttachment(from: content, api: api).done { url in
-                seal(try? Data(contentsOf: url))
-            }.catch { error in
-                Current.Log.info("CallKit: no thumbnail for call (\(error.localizedDescription))")
-                seal(nil)
+        let url: URL? = await withCheckedContinuation { continuation in
+            Current.notificationAttachmentManager.downloadAttachment(from: content, api: api).pipe { result in
+                switch result {
+                case let .fulfilled(url):
+                    continuation.resume(returning: url)
+                case let .rejected(error):
+                    Current.Log.info("CallKit: no thumbnail for call (\(error.localizedDescription))")
+                    continuation.resume(returning: nil)
+                }
             }
         }
+
+        guard let url else { return nil }
+        return try? Data(contentsOf: url)
     }
 
     private func presentCall(payload: CallKitNotificationPayload, server: Server, iconData: Data?) {
@@ -78,6 +87,7 @@ final class CallKitManager: NSObject {
         }
 
         let provider = CXProvider(configuration: configuration)
+        // `nil` queue delivers delegate callbacks on the main thread.
         provider.setDelegate(self, queue: nil)
 
         let uuid = UUID()
@@ -111,10 +121,13 @@ final class CallKitManager: NSObject {
         activeCall = nil
     }
 
+    /// Routes the frontend to the call's configured screen once it has been answered.
     private func navigate(for call: ActiveCall) {
         guard let path = call.navigatePath else { return }
         let server = call.server
         Current.Log.info("CallKit: navigating to \(path) after call answered")
+        // `appCoordinator` resolves once the web view window is ready; its `done` closure runs on
+        // the main queue, so the navigation happens on the main thread.
         Current.sceneManager.appCoordinator.done {
             $0.open(from: .notification, server: server, urlString: path, isComingFromAppIntent: false)
         }
