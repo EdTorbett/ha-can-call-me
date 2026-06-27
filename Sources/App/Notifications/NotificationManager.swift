@@ -32,15 +32,12 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     }()
 
     var commandManager = NotificationCommandManager()
-    let callKitManager = CallKitManager()
+    private lazy var callKitManager = CallKitManager()
+    private var didRegisterAppCommandHandlers = false
     private weak var cameraOverlayController: UIViewController?
 
     override init() {
         super.init()
-        commandManager.register(
-            command: CallKitNotificationPayload.command,
-            handler: IncomingCallNotificationCommandHandler(callKitManager: callKitManager)
-        )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didBecomeActive),
@@ -50,8 +47,19 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     }
 
     func setupNotifications() {
+        registerAppCommandHandlers()
         UNUserNotificationCenter.current().delegate = self
         _ = localPushManager
+    }
+
+    private func registerAppCommandHandlers() {
+        guard !didRegisterAppCommandHandlers else { return }
+        didRegisterAppCommandHandlers = true
+
+        commandManager.register(
+            command: CallKitNotificationPayload.command,
+            handler: IncomingCallNotificationCommandHandler(callKitManager: callKitManager)
+        )
     }
 
     @objc private func didBecomeActive() {
